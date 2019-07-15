@@ -8,4 +8,5 @@ require (
 	github.com/sbreitf1/exec v1.0.0
 	github.com/sbreitf1/fs v0.0.1
 	github.com/sirupsen/logrus v1.3.0
+	github.com/yalue/elf_reader v0.0.0-20190211214648-b367f9ad9553
 )
