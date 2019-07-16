@@ -27,6 +27,9 @@ const (
 	machineTypeUnknown = ""
 	machineTypeX86     = "x86"
 	machineTypeAMD64   = "x86-64"
+
+	patternLibName = "[a-zA-Z0-9.\\-_+]+"
+	patternLibPath = "[a-zA-Z0-9.\\-_+/]+"
 )
 
 var (
@@ -34,8 +37,9 @@ var (
 	argInputFile = appMain.Arg("in", "Input binary file").Required().String()
 	argOutputDir = appMain.Arg("out", "Output directory").Required().String()
 
+	clean       = appMain.Flag("clean", "Delete all files from output directory").Bool()
 	mode        = appMain.Flag("mode", "Mode can be one of '"+modeLDD+"', '"+modeReadELF+"' or '"+modeParse+"'.").Short('m').Default(modeReadELF).String()
-	findMode    = appMain.Flag("find", "Find mode can be one of '"+findModeLD+"' or '"+findModeSearch+"'.").Short('f').Default(findModeLD).String()
+	findMode    = appMain.Flag("findmode", "Find mode can be one of '"+findModeLD+"' or '"+findModeSearch+"'.").Short('f').Default(findModeLD).String()
 	machineType = machineTypeUnknown
 )
 
@@ -67,31 +71,58 @@ func main() {
 		log.Fatalf("Unknown binary machine type")
 	}
 	log.Infof("-> Machine Type %s", machineType)
-	log.Infof("Output dir %q", *argOutputDir)
+	log.Infof("Output dir %q", outputDir)
+
+	if *clean {
+		log.Infof("Clean output directory")
+		files, err := ioutil.ReadDir(outputDir)
+		if err != nil {
+			log.Fatalf("Failed to clean output directory")
+		}
+		for _, file := range files {
+			path := filepath.Join(outputDir, file.Name())
+			if file.IsDir() {
+				if err := os.RemoveAll(path); err != nil {
+					log.Fatalf("Failed to delete directory %q", path)
+				}
+			} else {
+				if err := os.Remove(filepath.Join(outputDir, file.Name())); err != nil {
+					log.Fatalf("Failed to delete file %q", path)
+				}
+			}
+		}
+	}
 
 	files, err := getAllDependencies(inputFile)
 	if err != nil {
 		log.Fatalf("Could not retrieve dependencies: %v", err)
 	}
 
+	log.Infof("Copy dependencies to output dir")
 	for _, file := range files {
-		log.Infof("Gather file %q", file)
+		log.Infof("-> Gather file %q", file)
 
 		dstFile := filepath.Join(outputDir, file)
 		dstDir := filepath.Dir(dstFile)
 		if err := os.MkdirAll(dstDir, os.ModePerm); err != nil {
-			log.Fatalf("-> Could not create parent directory: %v", err)
+			log.Fatalf("Could not create parent directory: %v", err)
 		}
 
 		if err := fs.CopyFile(file, dstFile); err != nil {
-			log.Fatalf("-> Failed to copy file: %v", err)
+			log.Fatalf("Failed to copy file: %v", err)
 		}
 	}
 
 	log.Infof("%d dependencies have been gathered", len(files))
 }
 
+/* ############################################## */
+/* ###           Dependency Listing           ### */
+/* ############################################## */
+
 func getAllDependencies(file string) ([]string, error) {
+	log.Infof("Retrieve dependencies")
+
 	switch *mode {
 	case modeLDD:
 		return getDependenciesRecursiveLDD(file)
@@ -116,7 +147,7 @@ func getDependenciesRecursiveLDD(file string) ([]string, error) {
 		return nil, fmt.Errorf("Code %d returned by 'ldd'", code)
 	}
 
-	pattern := regexp.MustCompile(`\s([a-zA-Z0-9.\-_/]+)(\s+=>\s+([a-zA-Z0-9.\-_/]+))?\s+\(0x[0-9a-f]+\)`)
+	pattern := regexp.MustCompile(`\s(` + patternLibName + `)(\s+=>\s+(` + patternLibPath + `))?\s+\(0x[0-9a-f]+\)`)
 	matches := pattern.FindAllStringSubmatch(result, -1)
 
 	files := make([]string, 0)
@@ -136,6 +167,10 @@ func getDependenciesRecursiveLDD(file string) ([]string, error) {
 	return files, nil
 }
 
+/* ############################################## */
+/* ###      Recursive Dependency Listing      ### */
+/* ############################################## */
+
 func getDependenciesRecursive(file string) ([]string, error) {
 	open, err := getDependencies(file)
 	if err != nil {
@@ -150,6 +185,8 @@ func getDependenciesRecursive(file string) ([]string, error) {
 	for len(open) > 0 {
 		lib := open[0]
 		open = open[1:]
+
+		log.Infof("-> Process %q", lib)
 
 		libs, err := getDependencies(lib)
 		if err != nil {
@@ -173,6 +210,9 @@ func getDependencies(file string) ([]string, error) {
 	case modeReadELF:
 		return getDependenciesReadELF(file)
 
+	case modeParse:
+		return getDependenciesParse(file)
+
 	default:
 		return nil, fmt.Errorf("Invalid mode %q", *mode)
 	}
@@ -188,7 +228,7 @@ func getDependenciesReadELF(file string) ([]string, error) {
 		return nil, fmt.Errorf("Code %d returned by 'ldd'", code)
 	}
 
-	pattern := regexp.MustCompile(`0x\d+\s+\(NEEDED\)[^[]+\[([a-zA-Z0-9.\-_]+)\]`)
+	pattern := regexp.MustCompile(`0x\d+\s+\(NEEDED\)[^[]+\[(` + patternLibName + `)\]`)
 	matches := pattern.FindAllStringSubmatch(result, -1)
 
 	files := make([]string, 0)
@@ -203,7 +243,7 @@ func getDependenciesReadELF(file string) ([]string, error) {
 	return files, nil
 }
 
-func doelf(file string) {
+func getDependenciesParse(file string) ([]string, error) {
 	raw, err := ioutil.ReadFile(file)
 	if err != nil {
 		panic(err)
@@ -212,52 +252,86 @@ func doelf(file string) {
 	if err != nil {
 		panic(err)
 	}
+
 	count := elfFile.GetSectionCount()
-	for i := uint16(0); i < count; i++ {
-		/*name, err := elfFile.GetSectionName(i)
+
+	// find dynamic section
+	dynSection := uint16(0)
+	for i := uint16(1); i < count; i++ {
+		name, err := elfFile.GetSectionName(i)
 		if err != nil {
-			panic(err)
-		}*/
-
-		header, err := elfFile.GetSectionHeader(i)
-		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("Failed to parse %q: %v", file, err)
 		}
-
-		if header.GetType() == elf.DynamicLinkingTableSection {
-			entries, err := elfFile.DynamicEntries(i)
-			if err != nil {
-				panic(err)
-			}
-			for _, entry := range entries {
-				if entry.GetTag().GetValue() == 1 {
-					fmt.Println(entry.GetTag(), "->", entry.GetTag().GetValue(), "->", entry.GetValue())
-				}
-			}
-		}
-
-		if elfFile.IsStringTable(i) {
-			entries, _ := elfFile.GetStringTable(i)
-			count := 0
-			for j, entry := range entries {
-				if is(entry) {
-					name, _ := elfFile.GetSectionName(i)
-					fmt.Println(name, "->", j, "->", entry, "=>", count)
-				}
-				count += len(entry) + 1
-			}
+		if name == ".dynamic" {
+			dynSection = i
+			break
 		}
 	}
+
+	if dynSection == uint16(0) {
+		return nil, fmt.Errorf("No dynamic section in %q found. Probably statically linked", file)
+	}
+
+	// find dynamic string section
+	dynStrSection := uint16(0)
+	for i := uint16(1); i < count; i++ {
+		name, err := elfFile.GetSectionName(i)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to parse %q: %v", file, err)
+		}
+		if name == ".dynstr" {
+			dynStrSection = i
+			break
+		}
+	}
+
+	if dynStrSection == uint16(0) {
+		return nil, fmt.Errorf("No dynamic strings section in %q found. Probably statically linked", file)
+	}
+
+	entries, err := elfFile.DynamicEntries(dynSection)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse %q: %v", file, err)
+	}
+	data, err := elfFile.GetSectionContent(dynStrSection)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse %q: %v", file, err)
+	}
+
+	files := make([]string, 0)
+	for _, entry := range entries {
+		// NEEDED flag (1)
+		if entry.GetTag().GetValue() == 1 {
+			start := entry.GetValue()
+			end := start
+			for ; end < uint64(len(data)); end++ {
+				if data[end] == 0 {
+					break
+				}
+			}
+			str := string(data[start:end])
+			path, err := findLibrary(str)
+			if err != nil {
+				return nil, fmt.Errorf("Could not find library file %q: %v", str, err)
+			}
+			files = append(files, path)
+		}
+	}
+
+	return files, nil
 }
 
-func is(str string) bool {
-	return strings.Contains(str, "libxml2.so.2") || strings.Contains(str, "libpthread.so.0") || strings.Contains(str, "libc.so.6")
-}
+/* ############################################## */
+/* ###             Find Libraries             ### */
+/* ############################################## */
 
 func findLibrary(name string) (string, error) {
 	switch *findMode {
 	case findModeLD:
 		return findLibraryLDConfig(name)
+
+	case findModeSearch:
+		return "", fmt.Errorf("Find mode %q is not implemented yet", findModeSearch)
 
 	default:
 		return "", fmt.Errorf("Invalid find mode %q", *findMode)
@@ -274,7 +348,7 @@ func findLibraryLDConfig(name string) (string, error) {
 		return "", fmt.Errorf("Code %d returned by 'ldconfig'", code)
 	}
 
-	pattern := regexp.MustCompile(`([([a-zA-Z0-9.\-_]+)\s+\([^)]+\)\s+=>\s+([([a-zA-Z0-9.\-_/]+)`)
+	pattern := regexp.MustCompile(`([(` + patternLibName + `)\s+\([^)]+\)\s+=>\s+(` + patternLibPath + `)`)
 	matches := pattern.FindAllStringSubmatch(result, -1)
 
 	candidates := make([]string, 0)
