@@ -73,21 +73,31 @@ func main() {
 	log.Infof("-> Machine Type %s", machineType)
 	log.Infof("Output dir %q", outputDir)
 
+	if isFile, err := fs.IsFile(outputDir); err != nil {
+		log.Fatalf("Failed to access output directory: %v", outputDir)
+	} else if isFile {
+		log.Fatalf("The output directory denotes a file")
+	}
+
 	if *clean {
-		log.Infof("Clean output directory")
-		files, err := ioutil.ReadDir(outputDir)
-		if err != nil {
-			log.Fatalf("Failed to clean output directory")
-		}
-		for _, file := range files {
-			path := filepath.Join(outputDir, file.Name())
-			if file.IsDir() {
-				if err := os.RemoveAll(path); err != nil {
-					log.Fatalf("Failed to delete directory %q", path)
-				}
-			} else {
-				if err := os.Remove(filepath.Join(outputDir, file.Name())); err != nil {
-					log.Fatalf("Failed to delete file %q", path)
+		if isDir, err := fs.IsDir(outputDir); err != nil {
+			log.Fatalf("Failed to access output directory: %v", outputDir)
+		} else if isDir {
+			log.Infof("Clean output directory")
+			files, err := ioutil.ReadDir(outputDir)
+			if err != nil {
+				log.Fatalf("Failed to clean output directory")
+			}
+			for _, file := range files {
+				path := filepath.Join(outputDir, file.Name())
+				if file.IsDir() {
+					if err := os.RemoveAll(path); err != nil {
+						log.Fatalf("Failed to delete directory %q", path)
+					}
+				} else {
+					if err := os.Remove(filepath.Join(outputDir, file.Name())); err != nil {
+						log.Fatalf("Failed to delete file %q", path)
+					}
 				}
 			}
 		}
@@ -147,18 +157,12 @@ func getDependenciesRecursiveLDD(file string) ([]string, error) {
 		return nil, fmt.Errorf("Code %d returned by 'ldd'", code)
 	}
 
-	pattern := regexp.MustCompile(`\s(` + patternLibName + `)(\s+=>\s+(` + patternLibPath + `))?\s+\(0x[0-9a-f]+\)`)
+	pattern := regexp.MustCompile(`(` + patternLibName + `\s+=>)?\s+(/` + patternLibPath + `)\s+\(0x[0-9a-f]+\)`)
 	matches := pattern.FindAllStringSubmatch(result, -1)
 
 	files := make([]string, 0)
 	for _, m := range matches {
-		var depFile string
-		if len(m[3]) == 0 {
-			depFile = m[1]
-		} else {
-			depFile = m[3]
-		}
-
+		depFile := m[2]
 		if strings.HasPrefix(depFile, "/") {
 			files = append(files, depFile)
 		}
